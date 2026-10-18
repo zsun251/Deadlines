@@ -52,7 +52,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         let editItem = NSMenuItem(); editItem.submenu = edit
         NSApp.mainMenu = NSMenu(); NSApp.mainMenu?.addItem(editItem)
         tick()
-        store.requestFullAccessToReminders { ok, err in NSLog("DLDEBUG request ok=%d err=%@", ok ? 1 : 0, String(describing: err)); if ok { DispatchQueue.main.async { self.tick() } } }
+        store.requestFullAccessToReminders { ok, _ in if ok { DispatchQueue.main.async { self.tick() } } }
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in self.tick() }
     }
 
@@ -352,7 +352,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     // One-way copy into the "Deadlines" list in Reminders; iCloud carries it to your other devices.
     // Changes made there are overwritten (or the item recreated) to match this app; nothing is read back.
     func syncReminders() {
-        NSLog("DLDEBUG auth=%d lists=%@ default=%@", EKEventStore.authorizationStatus(for: .reminder).rawValue, store.calendars(for: .reminder).map { $0.title }, store.defaultCalendarForNewReminders()?.title ?? "nil")
         guard EKEventStore.authorizationStatus(for: .reminder) == .fullAccess else { return }
         if remindersList == nil { remindersList = store.calendars(for: .reminder).first { $0.title == "Deadlines" } }
         if remindersList == nil, let source = store.defaultCalendarForNewReminders()?.source {
