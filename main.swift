@@ -206,10 +206,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
             If no time is given use 18:00. If there is no deadline, use null for due. If there are no links, use [] for urls.
             """
         let p = Process(); let pipe = Pipe()
-        let home = FileManager.default.homeDirectoryForCurrentUser
         p.executableURL = URL(fileURLWithPath: "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh")
         // The patch switches headless mode from the API-key route to the DeepSeek account route.
-        p.arguments = ["--profile", "headless", "--patch", home.appendingPathComponent("Applications/Deadlines/dsh-account.yml").path, prompt]
+        p.arguments = ["--profile", "headless", "--patch", Bundle.main.path(forResource: "dsh-account", ofType: "yml") ?? "", prompt]
         p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
         p.standardInput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice

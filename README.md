@@ -10,9 +10,14 @@ A deadline marked Done before it's due stays in the main list (with a ✓) until
 
 ## Build
 
+Builds the app into `~/Applications/Deadlines.app` (the source stays in this repo):
+
 ```sh
-swiftc -O main.swift -o Deadlines.app/Contents/MacOS/Deadlines
-codesign --force -s "Deadlines Local Signing" --identifier com.user.deadlines Deadlines.app
+APP=~/Applications/Deadlines.app
+mkdir -p $APP/Contents/MacOS $APP/Contents/Resources
+cp Info.plist $APP/Contents/ && cp dsh-account.yml $APP/Contents/Resources/
+swiftc -O main.swift -o $APP/Contents/MacOS/Deadlines
+codesign --force -s "Deadlines Local Signing" --identifier com.user.deadlines $APP
 ```
 
 Sign with a stable (self-signed) certificate rather than ad-hoc (`-s -`), otherwise macOS asks for Screen Recording permission again after every rebuild.
