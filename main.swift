@@ -3,7 +3,7 @@ import Vision
 import EventKit
 
 struct Deadline: Codable { var title: String; var due: Date; var fired: [Int] = []; var notes: String?; var done: Bool?
-                          var rid: String? }   // rid: the matching item in Reminders
+                          var rid: String?; var synced: String? }   // rid: the matching item in Reminders; synced: its last synced key
 
 // Text view with a placeholder, for the card's title and notes.
 class Box: NSTextView {
@@ -69,6 +69,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         df.dateFormat = "EEE MMM d, HH:mm"; return df.string(from: d)
     }
 
+    func archived(_ d: Deadline) -> Bool { d.done == true && d.due <= Date() }
+
     func save() { try? JSONEncoder().encode(list).write(to: file, options: .atomic) }
 
     func left(_ d: Date) -> String {
@@ -119,7 +121,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
             let isDone = d.done == true
             let m = NSMenuItem(title: "", action: nil, keyEquivalent: "")
             let urgent = !isDone && d.due.timeIntervalSinceNow < 86400   // due within a day (or overdue): bold
-            m.attributedTitle = NSAttributedString(string: "\(oneLine(d.title)) — \(when(d.due))" + (isDone ? "" : "  (\(left(d.due)))"),
+            m.attributedTitle = NSAttributedString(string: (isDone ? "✓ " : "") + "\(oneLine(d.title)) — \(when(d.due))" + (isDone ? "" : "  (\(left(d.due)))"),
                 attributes: [.font: urgent ? NSFont.boldSystemFont(ofSize: NSFont.systemFontSize) : NSFont.menuFont(ofSize: 0)])
             let sub = NSMenu()
             if let note = d.notes?.split(separator: "\n").first {   // notes preview instead of a floating tooltip
@@ -136,14 +138,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
                 let del = NSMenuItem(title: "Delete…", action: #selector(deleteOne(_:)), keyEquivalent: ""); del.tag = i; sub.addItem(del)
             }
             m.submenu = sub
-            (isDone ? completed : menu).addItem(m)
+            (archived(d) ? completed : menu).addItem(m)   // done early: stays in the main list until it's due
         }
         if menu.items.isEmpty { menu.addItem(NSMenuItem(title: "No deadlines", action: nil, keyEquivalent: "")) }
         if !completed.items.isEmpty {
             completed.addItem(.separator())
             completed.addItem(NSMenuItem(title: "Clear All Completed…", action: #selector(clearCompleted), keyEquivalent: ""))
             menu.addItem(.separator())
-            let c = NSMenuItem(title: "Completed (\(list.filter { $0.done == true }.count))", action: nil, keyEquivalent: "")
+            let c = NSMenuItem(title: "Completed (\(list.filter(archived).count))", action: nil, keyEquivalent: "")
             c.submenu = completed; menu.addItem(c)
         }
         menu.addItem(.separator())
@@ -158,7 +160,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     @objc func markDoing(_ s: NSMenuItem) { list[s.tag].done = nil; tick() }
     @objc func deleteOne(_ s: NSMenuItem) { confirmDelete([s.tag], "Delete “\(oneLine(list[s.tag].title))”?") }
     @objc func clearCompleted() {
-        let done = list.indices.filter { list[$0].done == true }
+        let done = list.indices.filter { archived(list[$0]) }
         confirmDelete(done, "Delete \(done.count) completed deadline\(done.count == 1 ? "" : "s")?")
     }
     func confirmDelete(_ indices: [Int], _ question: String) {
@@ -166,7 +168,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         a.addButton(withTitle: "Delete").hasDestructiveAction = true; a.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         guard a.runModal() == .alertFirstButtonReturn else { return }
-        for i in indices.sorted(by: >) { list.remove(at: i) }
+        for i in indices.sorted(by: >) {
+            if let id = list[i].rid, let r = store.calendarItem(withIdentifier: id) as? EKReminder { try? store.remove(r, commit: false) }
+            list.remove(at: i)
+        }
+        try? store.commit()
         tick()
     }
     @objc func cardButton(_ b: NSButton) { NSApp.stopModal(withCode: NSApplication.ModalResponse(b.tag)) }
@@ -349,8 +355,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         return false
     }
 
-    // One-way copy into the "Deadlines" list in Reminders; iCloud carries it to your other devices.
-    // Changes made there are overwritten (or the item recreated) to match this app; nothing is read back.
+    // Two-way sync with the "Deadlines" list in Reminders (iCloud carries it to your other devices).
+    // Title, time and notes edited there come back here, and new items there are added here. Completing or deleting
+    // can only be done in this app: a reminder ticked or deleted there is restored (it's usually an accidental tap).
     func syncReminders() {
         guard EKEventStore.authorizationStatus(for: .reminder) == .fullAccess else { return }
         if remindersList == nil { remindersList = store.calendars(for: .reminder).first { $0.title == "Deadlines" } }
@@ -360,22 +367,54 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         }
         guard let cal = remindersList else { return }
         let calendar = Calendar.current
+        func key(_ title: String, _ notes: String?, _ due: Date?) -> String {
+            "\(title)\u{1}\(notes ?? "")\u{1}\(due.map { Int($0.timeIntervalSince1970) / 60 } ?? -1)"
+        }
+        // Done early (pending) shows as "✅ title" in Reminders, since it stays unticked there until it's due.
+        let mark = "✅ "
+        func plain(_ t: String?) -> String { let t = t ?? ""; return t.hasPrefix(mark) ? String(t.dropFirst(mark.count)) : t }
         for i in list.indices {
+            let found = list[i].rid.flatMap { store.calendarItem(withIdentifier: $0) as? EKReminder }
+            let r = found ?? EKReminder(eventStore: store)
+            let rDue = r.dueDateComponents.flatMap { calendar.date(from: $0) }
             let d = list[i]
-            let r = d.rid.flatMap { store.calendarItem(withIdentifier: $0) as? EKReminder } ?? EKReminder(eventStore: store)
-            let due = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: d.due)
-            if r.calendar == cal, r.title == d.title, (r.notes ?? "") == (d.notes ?? ""), r.isCompleted == (d.done == true),
-               r.dueDateComponents.flatMap({ calendar.date(from: $0) }) == calendar.date(from: due) { continue }
-            r.calendar = cal; r.title = d.title; r.notes = d.notes; r.dueDateComponents = due; r.isCompleted = d.done == true
+            // Edited in Reminders since the last sync, and not here: take those edits.
+            if found != nil, let s = d.synced, key(plain(r.title), r.notes, rDue) != s, key(d.title, d.notes, d.due) == s {
+                let t = plain(r.title).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty { list[i].title = t }
+                let n = (r.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                list[i].notes = n.isEmpty ? nil : n
+                if let rDue = rDue, Int(rDue.timeIntervalSince1970) / 60 != Int(d.due.timeIntervalSince1970) / 60 {
+                    list[i].due = rDue
+                    list[i].fired = remindBefore.filter { rDue.timeIntervalSinceNow <= Double($0) }
+                }
+            }
+            let e = list[i]
+            let shown = (e.done == true && !archived(e) ? mark : "") + e.title
+            let due = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: e.due)
+            list[i].synced = key(e.title, e.notes, calendar.date(from: due))
+            if r.calendar == cal, r.title == shown, (r.notes ?? "") == (e.notes ?? ""), r.isCompleted == archived(e),
+               rDue == calendar.date(from: due) { continue }
+            r.calendar = cal; r.title = shown; r.notes = e.notes; r.dueDateComponents = due; r.isCompleted = archived(e)
             if (try? store.save(r, commit: false)) != nil { list[i].rid = r.calendarItemIdentifier }
         }
         try? store.commit()
-        // Delete reminders whose deadline was deleted here.
-        let keep = Set(list.compactMap { $0.rid })
+        // Reminders added in the list elsewhere become new deadlines. Run in the default mode only,
+        // so the list never changes under an open menu or card.
         store.fetchReminders(matching: store.predicateForReminders(in: [cal])) { rs in
-            DispatchQueue.main.async {
-                for r in rs ?? [] where !keep.contains(r.calendarItemIdentifier) { try? self.store.remove(r, commit: false) }
-                try? self.store.commit()
+            RunLoop.main.perform(inModes: [.default]) {
+                let known = Set(self.list.compactMap { $0.rid })
+                let new = (rs ?? []).filter { !known.contains($0.calendarItemIdentifier) }
+                guard !new.isEmpty else { return }
+                for r in new {
+                    let due = r.dueDateComponents.flatMap { calendar.date(from: $0) }
+                        ?? calendar.date(bySettingHour: 18, minute: 0, second: 0, of: Date().addingTimeInterval(86400)) ?? Date()
+                    let title = plain(r.title).trimmingCharacters(in: .whitespacesAndNewlines)
+                    var d = Deadline(title: title.isEmpty ? "Untitled" : title, due: due, notes: r.notes, rid: r.calendarItemIdentifier)
+                    d.fired = self.remindBefore.filter { due.timeIntervalSinceNow <= Double($0) }
+                    self.list.append(d)
+                }
+                self.tick()
             }
         }
     }
