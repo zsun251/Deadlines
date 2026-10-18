@@ -8,4 +8,5 @@
   <key>CFBundleVersion</key><string>1</string>
   <key>LSUIElement</key><true/>
   <key>NSScreenCaptureUsageDescription</key><string>Deadlines reads the screen region you select to fill in a deadline.</string>
+  <key>NSRemindersFullAccessUsageDescription</key><string>Deadlines copies your deadlines into a "Deadlines" list in Reminders so they sync to your other devices.</string>
 </dict></plist>

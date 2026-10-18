@@ -1,7 +1,9 @@
 import Cocoa
 import Vision
+import EventKit
 
-struct Deadline: Codable { var title: String; var due: Date; var fired: [Int] = []; var notes: String?; var done: Bool? }
+struct Deadline: Codable { var title: String; var due: Date; var fired: [Int] = []; var notes: String?; var done: Bool?
+                          var rid: String? }   // rid: the matching item in Reminders
 
 // Text view with a placeholder, for the card's title and notes.
 class Box: NSTextView {
@@ -23,6 +25,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     var list: [Deadline] = []
     var reading = false
     var card: NSPanel?, cardTitle: Box?, cardNotes: Box?
+    let store = EKEventStore()
+    var remindersList: EKCalendar?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         if let d = try? Data(contentsOf: file) {
@@ -48,6 +52,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         let editItem = NSMenuItem(); editItem.submenu = edit
         NSApp.mainMenu = NSMenu(); NSApp.mainMenu?.addItem(editItem)
         tick()
+        store.requestFullAccessToReminders { ok, err in NSLog("DLDEBUG request ok=%d err=%@", ok ? 1 : 0, String(describing: err)); if ok { DispatchQueue.main.async { self.tick() } } }
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in self.tick() }
     }
 
@@ -85,6 +90,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
             }
             if late { missed.append(list[i]) }
         }
+        syncReminders()
         save()
         if !missed.isEmpty {   // reminders that came due while the Mac was asleep or the app wasn't running
             NSSound(named: "Glass")?.play()
@@ -341,6 +347,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         if sel == #selector(NSResponder.insertTab(_:)) { v.window?.selectNextKeyView(nil); return true }
         if sel == #selector(NSResponder.insertBacktab(_:)) { v.window?.selectPreviousKeyView(nil); return true }
         return false
+    }
+
+    // One-way copy into the "Deadlines" list in Reminders; iCloud carries it to your other devices.
+    // Changes made there are overwritten (or the item recreated) to match this app; nothing is read back.
+    func syncReminders() {
+        NSLog("DLDEBUG auth=%d lists=%@ default=%@", EKEventStore.authorizationStatus(for: .reminder).rawValue, store.calendars(for: .reminder).map { $0.title }, store.defaultCalendarForNewReminders()?.title ?? "nil")
+        guard EKEventStore.authorizationStatus(for: .reminder) == .fullAccess else { return }
+        if remindersList == nil { remindersList = store.calendars(for: .reminder).first { $0.title == "Deadlines" } }
+        if remindersList == nil, let source = store.defaultCalendarForNewReminders()?.source {
+            let c = EKCalendar(for: .reminder, eventStore: store); c.title = "Deadlines"; c.source = source
+            if (try? store.saveCalendar(c, commit: true)) != nil { remindersList = c }
+        }
+        guard let cal = remindersList else { return }
+        let calendar = Calendar.current
+        for i in list.indices {
+            let d = list[i]
+            let r = d.rid.flatMap { store.calendarItem(withIdentifier: $0) as? EKReminder } ?? EKReminder(eventStore: store)
+            let due = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: d.due)
+            if r.calendar == cal, r.title == d.title, (r.notes ?? "") == (d.notes ?? ""), r.isCompleted == (d.done == true),
+               r.dueDateComponents.flatMap({ calendar.date(from: $0) }) == calendar.date(from: due) { continue }
+            r.calendar = cal; r.title = d.title; r.notes = d.notes; r.dueDateComponents = due; r.isCompleted = d.done == true
+            if (try? store.save(r, commit: false)) != nil { list[i].rid = r.calendarItemIdentifier }
+        }
+        try? store.commit()
+        // Delete reminders whose deadline was deleted here.
+        let keep = Set(list.compactMap { $0.rid })
+        store.fetchReminders(matching: store.predicateForReminders(in: [cal])) { rs in
+            DispatchQueue.main.async {
+                for r in rs ?? [] where !keep.contains(r.calendarItemIdentifier) { try? self.store.remove(r, commit: false) }
+                try? self.store.commit()
+            }
+        }
     }
 
     func remind(_ d: Deadline) {
