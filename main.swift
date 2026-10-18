@@ -121,7 +121,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
             let isDone = d.done == true
             let m = NSMenuItem(title: "", action: nil, keyEquivalent: "")
             let urgent = !isDone && d.due.timeIntervalSinceNow < 86400   // due within a day (or overdue): bold
-            m.attributedTitle = NSAttributedString(string: (isDone ? "✓ " : "") + "\(oneLine(d.title)) — \(when(d.due))" + (isDone ? "" : "  (\(left(d.due)))"),
+            m.attributedTitle = NSAttributedString(string: (isDone ? "✓ " : "") + "\(oneLine(d.title)) — \(when(d.due))" + (archived(d) ? "" : "  (\(left(d.due)))"),   // done early still shows the time left
                 attributes: [.font: urgent ? NSFont.boldSystemFont(ofSize: NSFont.systemFontSize) : NSFont.menuFont(ofSize: 0)])
             let sub = NSMenu()
             if let note = d.notes?.split(separator: "\n").first {   // notes preview instead of a floating tooltip
