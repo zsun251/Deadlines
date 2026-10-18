@@ -185,37 +185,55 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
         p.arguments = ["-i", "-x", path]   // drag to select a region, no shutter sound
-        guard (try? p.run()) != nil else { return }
-        p.waitUntilExit()
+        p.terminationHandler = { _ in DispatchQueue.main.async { self.readScreenshot(path) } }   // keep the app responsive while selecting
+        try? p.run()
+    }
+
+    func readScreenshot(_ path: String) {
         guard FileManager.default.fileExists(atPath: path) else { return } // cancelled
         reading = true; tick()
         DispatchQueue.global().async {
-            let guess = self.askDeepSeek(path) ?? self.localGuess(path)
+            let guess = self.askGemini(path) ?? self.localGuess(path)
             DispatchQueue.main.async { self.reading = false; self.tick(); self.edit(title: guess.0, due: guess.1, notes: guess.2) }
         }
     }
 
-    // Ask DeepSeek Harness (signed in with your DeepSeek account, no API key) to read the screenshot.
-    func askDeepSeek(_ path: String) -> (String, Date?, String?)? {
+    // Ask Gemini to read the screenshot. The API key lives in the login keychain:
+    //   security add-generic-password -s deadlines-gemini -a gemini -w <key>
+    func askGemini(_ path: String) -> (String, Date?, String?)? {
+        let k = Process(); let kp = Pipe()
+        k.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        k.arguments = ["find-generic-password", "-s", "deadlines-gemini", "-w"]
+        k.standardOutput = kp; k.standardError = FileHandle.nullDevice
+        guard (try? k.run()) != nil else { return nil }
+        k.waitUntilExit()
+        let key = String(data: kp.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard k.terminationStatus == 0, !key.isEmpty, let png = FileManager.default.contents(atPath: path) else { return nil }
         let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd'T'HH:mm"
         let now = df.string(from: Date()) + " " + DateFormatter().weekdaySymbols[Calendar.current.component(.weekday, from: Date()) - 1]
         let prompt = """
-            Read the screenshot at \(path). It shows something with a deadline. Now is \(now) (local time). \
+            The screenshot shows something with a deadline. Now is \(now) (local time). \
             Reply with ONLY a JSON object, no other text: {"title": "short task title in the screenshot's language", \
             "due": "YYYY-MM-DDTHH:mm", "urls": ["every URL or web link visible in the screenshot, exactly as shown"]} in local time. \
             If no time is given use 18:00. If there is no deadline, use null for due. If there are no links, use [] for urls.
             """
-        let p = Process(); let pipe = Pipe()
-        p.executableURL = URL(fileURLWithPath: "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh")
-        // The patch switches headless mode from the API-key route to the DeepSeek account route.
-        p.arguments = ["--profile", "headless", "--patch", Bundle.main.path(forResource: "dsh-account", ofType: "yml") ?? "", prompt]
-        p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
-        p.standardInput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        p.standardOutput = pipe
-        guard (try? p.run()) != nil else { return nil }
-        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        p.waitUntilExit()
+        let body: [String: Any] = [
+            "contents": [["parts": [["inline_data": ["mime_type": "image/png", "data": png.base64EncodedString()]], ["text": prompt]]]],
+            "generationConfig": ["responseMimeType": "application/json"]]
+        var req = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent")!)
+        req.httpMethod = "POST"; req.timeoutInterval = 60
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(key, forHTTPHeaderField: "x-goog-api-key")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        var data: Data?
+        let done = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: req) { d, _, _ in data = d; done.signal() }.resume()
+        done.wait()
+        guard let data, let r = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let parts = ((r["candidates"] as? [[String: Any]])?.first?["content"] as? [String: Any])?["parts"] as? [[String: Any]]
+        else { return nil }
+        let out = parts.compactMap { $0["text"] as? String }.joined()
         guard let a = out.firstIndex(of: "{"), let b = out.lastIndex(of: "}"),
               let j = try? JSONSerialization.jsonObject(with: Data(out[a...b].utf8)) as? [String: Any],
               let title = j["title"] as? String else { return nil }
@@ -258,10 +276,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         w.isMovableByWindowBackground = true; w.level = .floating
         let v = w.contentView!
 
-        let t = Box(frame: NSRect(x: 15, y: 184, width: 330, height: 28))
+        let tf = NSBox(frame: NSRect(x: 20, y: 186, width: 320, height: 32))   // visible field outline, grows with the title
+        tf.boxType = .custom; tf.titlePosition = .noTitle; tf.contentViewMargins = .zero
+        tf.cornerRadius = 6; tf.borderWidth = 1
+        tf.borderColor = .separatorColor; tf.fillColor = .textBackgroundColor
+        let t = Box(frame: NSRect(x: 1, y: 1, width: 318, height: 30))
         t.placeholder = "What's due?"; t.string = old?.title ?? title
         t.font = .systemFont(ofSize: 17, weight: .semibold); t.drawsBackground = false
-        t.isRichText = false; t.isVerticallyResizable = false; t.textContainerInset = NSSize(width: 0, height: 2); t.delegate = self
+        t.isRichText = false; t.isVerticallyResizable = false; t.textContainerInset = NSSize(width: 3, height: 4); t.delegate = self
+        tf.contentView?.addSubview(t)
 
         let p = NSDatePicker(frame: NSRect(x: 20, y: 150, width: 200, height: 24))
         p.datePickerElements = [.yearMonthDay, .hourMinute]
@@ -273,7 +296,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         let frame = NSBox(frame: NSRect(x: 20, y: 58, width: 320, height: 82))   // visible field outline
         frame.boxType = .custom; frame.titlePosition = .noTitle; frame.contentViewMargins = .zero
         frame.cornerRadius = 6; frame.borderWidth = 1
-        frame.borderColor = .tertiaryLabelColor; frame.fillColor = .quaternaryLabelColor
+        frame.borderColor = .separatorColor; frame.fillColor = .textBackgroundColor   // same look as the date field
         let ns = NSScrollView(frame: NSRect(x: 1, y: 1, width: 318, height: 80))
         ns.hasVerticalScroller = true; ns.autohidesScrollers = true; ns.borderType = .noBorder; ns.drawsBackground = false
         frame.contentView?.addSubview(ns)
@@ -293,7 +316,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         save.keyEquivalent = "\r"; save.keyEquivalentModifierMask = .command; save.bezelColor = .controlAccentColor
         button("Cancel", 0, 176).keyEquivalent = "\u{1b}"
         if old != nil { button("Delete", 2, 20).hasDestructiveAction = true }
-        [t, p, c, frame].forEach { v.addSubview($0) }
+        [tf, p, c, frame].forEach { v.addSubview($0) }
 
         card = w; cardTitle = t; fitTitle()
         w.center(); NSApp.activate(ignoringOtherApps: true); w.makeKeyAndOrderFront(nil)
@@ -321,10 +344,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     func fitTitle() {
         guard let w = card, let t = cardTitle, let lm = t.layoutManager, let tc = t.textContainer else { return }
         lm.ensureLayout(for: tc)
-        let h = max(28, ceil(lm.usedRect(for: tc).height) + 4)
+        let h = max(30, ceil(lm.usedRect(for: tc).height) + 8)
         t.frame.size.height = h
+        t.superview?.superview?.frame.size.height = h + 2   // the outline box around the title
         let top = w.frame.maxY
-        var f = w.frameRect(forContentRect: NSRect(x: w.frame.minX, y: 0, width: 360, height: 212 + h))
+        var f = w.frameRect(forContentRect: NSRect(x: w.frame.minX, y: 0, width: 360, height: 216 + h))
         f.origin.y = top - f.height
         w.setFrame(f, display: true)
     }
