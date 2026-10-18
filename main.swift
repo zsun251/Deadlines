@@ -157,7 +157,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
 
     @objc func open(_ s: NSMenuItem) { edit(index: s.tag) }
     @objc func markDone(_ s: NSMenuItem) { list[s.tag].done = true; tick() }
-    @objc func markDoing(_ s: NSMenuItem) { list[s.tag].done = nil; tick() }
+    @objc func markDoing(_ s: NSMenuItem) {
+        let d = list[s.tag]; list[s.tag].done = nil
+        list[s.tag].fired = remindBefore.filter { d.due.timeIntervalSinceNow <= Double($0) }   // no "missed" alert for times passed while done
+        tick()
+    }
     @objc func deleteOne(_ s: NSMenuItem) { confirmDelete([s.tag], "Delete “\(oneLine(list[s.tag].title))”?") }
     @objc func clearCompleted() {
         let done = list.indices.filter { archived(list[$0]) }
@@ -180,6 +184,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     @objc func addBlank() { edit() }
 
     @objc func addFromScreenshot() {
+        guard !reading else { return }   // one screenshot at a time: they share the temp file
         let path = NSTemporaryDirectory() + "deadline-shot.png"
         try? FileManager.default.removeItem(atPath: path)
         let p = Process()
@@ -193,8 +198,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         guard FileManager.default.fileExists(atPath: path) else { return } // cancelled
         reading = true; tick()
         DispatchQueue.global().async {
-            let guess = self.askGemini(path) ?? self.localGuess(path)
-            DispatchQueue.main.async { self.reading = false; self.tick(); self.edit(title: guess.0, due: guess.1, notes: guess.2) }
+            let ai = self.askGemini(path), guess = ai ?? self.localGuess(path)
+            try? FileManager.default.removeItem(atPath: path)   // don't leave screenshots lying around
+            let hint = ai == nil ? "Gemini didn’t answer — read on device" : nil
+            DispatchQueue.main.async { self.reading = false; self.tick(); self.edit(title: guess.0, due: guess.1, notes: guess.2, hint: hint) }
         }
     }
 
@@ -238,7 +245,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
               let j = try? JSONSerialization.jsonObject(with: Data(out[a...b].utf8)) as? [String: Any],
               let title = j["title"] as? String else { return nil }
         let urls = (j["urls"] as? [String] ?? []).joined(separator: "\n")
-        return (title, (j["due"] as? String).flatMap { df.date(from: $0) }, urls.isEmpty ? nil : urls)
+        return (title, (j["due"] as? String).flatMap { df.date(from: String($0.prefix(16)).replacingOccurrences(of: " ", with: "T")) }, urls.isEmpty ? nil : urls)
     }
 
     // Offline fallback: on-device text recognition + date pattern matching.
@@ -268,7 +275,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
 
     // One card for adding (index nil) and for viewing/editing an existing deadline.
     // Return makes a new line in title and notes; ⌘↩ saves, Esc cancels, Tab switches fields.
-    func edit(index: Int? = nil, title: String = "", due: Date? = nil, notes: String? = nil) {
+    func edit(index: Int? = nil, title: String = "", due: Date? = nil, notes: String? = nil, hint: String? = nil) {
         let old = index.map { list[$0] }
         let w = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 240),
                         styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: true)
@@ -316,6 +323,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         save.keyEquivalent = "\r"; save.keyEquivalentModifierMask = .command; save.bezelColor = .controlAccentColor
         button("Cancel", 0, 176).keyEquivalent = "\u{1b}"
         if old != nil { button("Delete", 2, 20).hasDestructiveAction = true }
+        if let hint {   // why the card may be less accurate than usual
+            let l = NSTextField(labelWithString: hint); l.font = .systemFont(ofSize: 11); l.textColor = .secondaryLabelColor
+            l.frame = NSRect(x: 20, y: 22, width: 150, height: 28); l.maximumNumberOfLines = 2; l.lineBreakMode = .byWordWrapping; v.addSubview(l)
+        }
         [tf, p, c, frame].forEach { v.addSubview($0) }
 
         card = w; cardTitle = t; fitTitle()
@@ -332,7 +343,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
         var d = old ?? Deadline(title: "", due: p.dateValue)
         d.title = newTitle; d.notes = newNotes.isEmpty ? nil : newNotes
         d.done = c.state == .on ? true : nil
-        if old?.due != p.dateValue {   // new or rescheduled: don't fire reminders already in the past
+        if old?.due != p.dateValue || (old?.done == true && d.done == nil) {   // new, rescheduled or undone: don't fire reminders already in the past
             d.due = p.dateValue
             d.fired = remindBefore.filter { d.due.timeIntervalSinceNow <= Double($0) }
         }
@@ -435,6 +446,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
                     let title = plain(r.title).trimmingCharacters(in: .whitespacesAndNewlines)
                     var d = Deadline(title: title.isEmpty ? "Untitled" : title, due: due, notes: r.notes, rid: r.calendarItemIdentifier)
                     d.fired = self.remindBefore.filter { due.timeIntervalSinceNow <= Double($0) }
+                    if r.isCompleted { d.done = true }
                     self.list.append(d)
                 }
                 self.tick()

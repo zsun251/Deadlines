@@ -2,7 +2,7 @@
 
 A macOS menu bar app for tracking deadlines, with reminders 1 day before, 1 hour before, and when due. Data is stored in `~/.deadlines.json`.
 
-You can add a deadline by selecting a region of the screen: the screenshot is read by Gemini (`gemini-flash-latest`), falling back to on-device Vision text recognition. Store your Gemini API key in the login keychain:
+You can add a deadline by selecting a region of the screen: the screenshot is read by Gemini (`gemini-flash-lite-latest`), falling back to on-device Vision text recognition. Store your Gemini API key in the login keychain:
 
 ```sh
 security add-generic-password -s deadlines-gemini -a gemini -w <your-key>
